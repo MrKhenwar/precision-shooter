@@ -17,3 +17,7 @@ npm-debug.*
 .DS_Store
 .vscode/
 .idea/
+
+# Android signing (never commit)
+mobile/credentials/
+mobile/credentials.json
