@@ -1,0 +1,405 @@
+# Precision Shooter App — Feature Specifications
+
+**Project:** Precision Shooter Mobile/Web Application
+**Stack:** React (frontend) · FastAPI / Python (backend) · PostgreSQL · Redis
+**Version:** 1.0 — derived from App-Functionality.docx (BFR)
+
+---
+
+## Functional Requirements
+
+---
+
+### FR-001 — Authentication & Onboarding
+
+**Registration channels:** Email + password, Mobile number + OTP, or both simultaneously.
+
+**Security rules:**
+- Google reCAPTCHA v3 must be submitted with every `/register` and `/login` call; score threshold ≥ 0.5.
+- OTP validity: 120 seconds. Max 3 resend requests per hour per user. After 3 failed OTP attempts, lock account for 15 minutes.
+- Passwords: minimum 8 characters; must contain at least 1 uppercase, 1 lowercase, 1 digit, 1 special character.
+
+**Device binding:**
+- 1 User ID = 1 active device at any time.
+- On login from a second device: invalidate session on first device, send push notification to first device ("New sign-in detected on another device"), store new device fingerprint.
+
+**Basic data cached offline (IndexedDB, AES-256 encrypted):**
+- User profile, today's training plan, last 7 days of performance data.
+
+**Registration field matrix:**
+
+| Field | Type | Validation | Personas |
+|---|---|---|---|
+| First Name | Text | Max 50 chars, alpha only | All |
+| Last Name | Text | Max 50 chars, alpha only | All |
+| Email / Mobile | Text / Numeric | Unique, regex validated | All |
+| Password | Text (encrypted) | Min 8, complexity rules above | All |
+| Shooting Assoc. ID | Alphanumeric | Optional; format per national/state body | Athlete |
+| DOB | Date | Age calculated dynamically | Athlete |
+| Gender | Dropdown | Male / Female / Other | Athlete |
+| Age Category | Dropdown (auto) | Auto-derived from DOB: Sub-Youth / Youth / Junior / Senior | Athlete |
+| State / Club | Dropdown + Search | Master list of registered clubs/states | Athlete |
+| Coach Mobile No. | Numeric | Triggers linkage request on submit | Athlete |
+| Dominant Hand | Dropdown | RH / LH | Athlete |
+| Dominant Eye | Dropdown | Right / Left / Cross-Dominant | Athlete |
+| Discipline | Dropdown | 10m Air Rifle / 10m Air Pistol | Athlete |
+| Diet Type | Dropdown | Veg / Non-Veg / Vegan / Eggetarian | Athlete |
+| Current Level | Text (read-only) | Set exclusively by Coach | Athlete |
+| Coaching License | Text + File Upload | ISSF A/B/C / National License type + years of exp | Coach |
+| Expert Profile | Text + File Upload | Degree, years of exp, institute, service history, bio | External Expert |
+
+**Post-registration flow:**
+1. Email or SMS OTP verification.
+2. Persona selection screen (if not pre-selected via registration URL).
+3. Profile completion wizard (persona-specific fields above).
+4. Coach persona: optional onboarding tour of dashboard modules.
+
+---
+
+### FR-002 — Subscription & Billing
+
+**Athlete tiers:**
+
+| Plan | Trigger | Monthly Fee |
+|---|---|---|
+| Trial | Account creation | Free (90 days) |
+| Coach-linked | Athlete linked to active Coach | ₹10/month |
+| AI-Coached | No Coach linked | ₹50/month |
+
+**Parent tier:** ₹20/month flat. Grants read-only dashboard view of one linked athlete.
+
+**Coach tier:** Free. No subscription fee.
+
+**External Expert tier:** Free profile listing; booking/consulting features reserved for future monetization.
+
+**Trial-to-paid flow:**
+- Day 75: trigger in-app banner + FCM push notification prompting subscription selection.
+- Day 90: if no subscription selected, account enters read-only grace mode for 7 days, then suspends.
+
+**Coach disconnection downgrade:**
+- If Coach account becomes inactive or Coach removes an Athlete, Athlete has a 7-day grace period at current rate.
+- At next billing cycle after grace period ends, Athlete is automatically downgraded to the AI-Coached tier (₹50/month).
+
+**Payment integration:**
+- Razorpay Subscriptions API for recurring billing.
+- Razorpay webhook at `/api/v1/subscriptions/webhook` handles: `subscription.activated`, `subscription.charged`, `subscription.halted`, `payment.failed`.
+- On `payment.failed`: send push + WhatsApp reminder immediately; retry payment after 24h, then 48h.
+
+---
+
+### FR-003 — Coach-Athlete Linkage Workflow
+
+```
+1. Athlete enters Coach's mobile number during registration or from profile settings.
+2. System checks: does a Coach account exist with that mobile number?
+   └── No  → Display error: "Coach not found. Ask your coach to register first."
+   └── Yes → Create CoachAthleteRequest record (status: pending)
+              Send FCM push to Coach: "Athlete [Name] has requested to link with you."
+3. Coach sees pending request in their dashboard notification centre.
+   └── Coach Rejects → Status: rejected. Athlete notified. Athlete can try a different coach.
+   └── Coach Accepts → Status: accepted.
+                       Coach Name auto-populates on Athlete profile.
+                       Athlete billing plan updates to ₹10/month at next cycle (or immediately if on trial).
+4. Coach can unlink an Athlete at any time from the Athlete's profile card.
+   → 7-day grace period begins for the Athlete (FR-002).
+```
+
+---
+
+### FR-004 — Performance Tier Progression
+
+The Coach (only) updates an Athlete's current tier. Tiers are displayed on the Athlete's profile and used as filters on the Coach's roster view.
+
+| Tier | Criteria |
+|---|---|
+| **Rookie** | Absolute beginner; newly introduced to the sport |
+| **Novice** | ≥ 80/100 in sitting position, weapon supported on bench |
+| **Marksman** | ≥ 80/100 in sitting position, weapon fully unsupported |
+| **Sharpshooter** | ≥ 80/100 in official standing competitive stance |
+| **District / Pre-State Qualified** | Verified by Coach from official match results |
+| **State Qualified** | Verified by Coach from official match results |
+| **Zone Qualified** | Verified by Coach from official match results |
+| **National Qualified** | Verified by Coach from official match results |
+| **Trial Qualified** | Verified by Coach from official match results |
+| **National Team Qualified** | Verified by Coach from official match results |
+
+- The `current_tier` field on `AthleteProfile` is writable only by the linked Coach via `PUT /api/v1/coaches/me/athletes/{id}`.
+- Tier history is stored as an append-only log with timestamp and Coach ID for audit.
+
+---
+
+### FR-005 — Coach Dashboard KPIs
+
+The Coach landing screen displays three primary KPI cards, refreshed every 60 seconds (Redis-cached):
+
+| KPI Card | Calculation |
+|---|---|
+| Total Active Athletes | Count of Athletes with `status = active` and `coach_id = current_coach` |
+| Today's Attendance % | `(present_count / total_scheduled_today) × 100` |
+| Open Fees Due | Sum of `amount_due` where `status IN (pending, overdue)` for current coach's athletes |
+
+Below KPIs: shortcut tiles to Attendance, Batches, Training Plans, Fees, Inventory.
+
+---
+
+### FR-006 — Attendance Engine
+
+**Session creation (by Coach):**
+- Coach taps "Start Session" → selects batch → system generates:
+  - A **QR code** (UUID session token, 30-minute TTL) displayed on Coach's screen.
+  - Optional: Coach can enable **geofence mode** by entering club GPS coordinates and radius (default 100m).
+
+**Attendance marking:**
+- *Coach-led*: Coach taps checkboxes on a batch roster list → submits.
+- *Athlete self-mark via QR*: Athlete scans QR on Coach's screen; server validates token not expired and athlete is in the correct batch.
+- *Athlete self-mark via geofence*: Athlete taps "Mark Present"; server verifies device GPS falls within configured radius.
+
+**Views:**
+- **Today**: grid of all athletes in all active batches, editable until end of day.
+- **Weekly Overview**: 7-column grid per athlete showing P (present) / A (absent) / L (late).
+- **Monthly Heatmap**: Calendar-style heatmap per athlete; colour intensity = attendance %.
+- **Athlete-wise Drilldown**: Single athlete view — attendance % over last 30/90/180 days, overlaid with performance trend from ShotLog.
+
+---
+
+### FR-007 — Batch Management
+
+**Batch definition fields:**
+- Batch Name (text, max 50 chars)
+- Maximum Capacity (integer, 1–100)
+- Days of Week (multi-select: Mon–Sun)
+- Time Slot Start / End (time picker)
+- Assigned Coach (auto = current coach)
+
+**Athlete assignment:**
+- Drag-and-drop or checklist interface to move athletes into/out of batches.
+- System must prevent assignment if batch is at max capacity → display error: "Batch full. Increase capacity or create a new batch."
+- One athlete can belong to multiple batches (e.g., AM and PM sessions).
+
+**Bulk operations:**
+- Coach can move multiple athletes from one batch to another via multi-select + reassign action.
+
+---
+
+### FR-008 — Athlete Evaluation Framework
+
+Two evaluation types: **Initial** (once, at registration) and **Periodic** (recurring, Coach-triggered).
+
+**Three evaluation pillars:**
+
+**1. Shooting Evaluation**
+| Metric | Scale | Notes |
+|---|---|---|
+| Hold Stability | 0–25 | Assessed via video analysis or SCATT data |
+| Trigger Timing | 0–25 | Consistency of shot release |
+| Approach (pre-shot routine) | 0–25 | Scored by Coach observation |
+| Follow-through | 0–25 | Post-shot body position stability |
+| **Shooting Subtotal** | 0–100 | |
+
+**2. S&C Evaluation**
+| Metric | Scale | Notes |
+|---|---|---|
+| Core Strength | 0–33 | Plank hold time / functional test |
+| Cardiovascular Endurance | 0–33 | Step test / VO2 max proxy |
+| Balance Stability Index | 0–34 | Single-leg balance test duration |
+| **S&C Subtotal** | 0–100 | |
+
+**3. Overall Assessment**
+- `overall_score = (shooting_subtotal × 0.6) + (sc_subtotal × 0.4)` (weightings configurable by Coach)
+- Radar chart stored as JSON: `{ hold_stability, trigger_timing, approach, followthrough, core_strength, cardio_endurance, balance }` — 7-axis chart rendered on frontend with Recharts.
+
+**API response includes** full score breakdown + radar JSON for chart rendering.
+
+---
+
+### FR-009 — Shot Log & Pattern Analysis
+
+**Shot Log entry fields:**
+| Field | Type | Notes |
+|---|---|---|
+| Session Date | Date | |
+| Total Shots Fired | Integer | |
+| Inner Tens (10.3+) | Integer | shots scoring ≥ 10.3 on electronic target |
+| Grouping Size | Float (mm) | Tightest shot group diameter |
+| SCATT File | File upload | `.scatt` format → S3, parsed server-side |
+| Meyton File | File upload | `.xml`/`.csv` format → S3, parsed server-side |
+| Raw Shot Data | JSON array | `[{shot_no, score, x_offset, y_offset, timestamp}]` |
+
+**Pattern Analysis (computed server-side, stored in ShotLog):**
+- **Hold Movement Analytics**: standard deviation of X/Y offsets across all shots.
+- **Shot-by-Shot Progression Line**: moving average of scores (window = 5 shots); rendered as line chart.
+- **Fatigue Indicator**: compare average score of first-third of session vs. last-third; percentage drop-off. Threshold alert at > 10% drop.
+
+**File processing:** SCATT/Meyton file parsing is handled asynchronously via a Celery task; client polls `/api/v1/uploads/{task_id}/status` until `complete`.
+
+---
+
+### FR-010 — Daily Diary Record
+
+Athletes fill out a structured diary entry per training day. Coaches can view all entries for their linked athletes.
+
+**Diary entry fields:**
+| Field | Type | Range |
+|---|---|---|
+| Entry Date | Date | Auto (today), editable |
+| Sleep Quality | Integer | 1–10 |
+| Resting Heart Rate | Integer (bpm) | 30–120 |
+| Stress Level | Integer | 1–10 |
+| Subjective Training Notes | Text | Max 2000 chars |
+
+**Access:**
+- Athlete: create, edit (own entries only), view history.
+- Coach: read-only view of all diary entries for their linked athletes; weekly digest view showing trends in sleep/stress/RHR.
+- Parent: read-only view (no notes field — notes are private to coach access only).
+
+---
+
+### FR-011 — Training Plan Builder
+
+Three planning levels (hierarchical):
+
+```
+Macrocycle (Quarterly Plan)
+  └── Mesocycle (4–6 Week Block)
+        └── Micro / Daily Drill Templates
+```
+
+**Macrocycle fields:** Name, start date, end date, quarterly goals (text), competition peaks (dates array), technical themes (text).
+
+**Mesocycle fields:** Name, parent macrocycle ID, start/end week, focus area (technical / physical / mental / mixed).
+
+**Drill Template (Micro) fields:**
+| Field | Notes |
+|---|---|
+| Drill Type | Dropdown: Holding Drill / Dry Firing / Match Simulation / S&C / Recovery |
+| Description | Text |
+| Duration (min) | Integer |
+| Sets / Reps | Integer |
+| Assigned Date | Date |
+| Assigned Athletes | Multi-select from batch roster |
+
+**Athlete sync:** When a Coach publishes a drill, it immediately appears on each assigned Athlete's dashboard "Today's Plan" widget. Athletes cannot edit assigned drills; they can mark them as "Done" which logs a completion record.
+
+---
+
+### FR-012 — Fees Management
+
+**Fee ledger:** One `FeeRecord` row per athlete per calendar month.
+
+**Statuses:** `pending` → `paid` (on Razorpay confirmation) or `overdue` (if unpaid after the 5th of the month).
+
+**Automated reminder schedule (Celery cron):**
+- Day 1 of month: Push notification + WhatsApp message with fee amount and payment link.
+- Day 5 (if unpaid): Status auto-transitions to `overdue`; second WhatsApp + SMS reminder.
+- Day 10 (if still unpaid): Coach receives in-app alert listing overdue athletes.
+
+**Coach actions:**
+- View monthly fee ledger (all athletes, filterable by status).
+- Manually toggle status (e.g., for cash payments).
+- One-tap "Send Reminder" on individual athlete.
+- Export ledger as Excel file (Openpyxl).
+
+**Razorpay integration:**
+- Coach generates a Razorpay payment link per athlete (`POST /subscriptions/checkout`).
+- Webhook updates `FeeRecord.status` to `paid` on `payment.captured` event.
+
+---
+
+### FR-013 — Inventory Management
+
+**Item types:** Air Rifle, Air Pistol, Compressed Air Cylinder, Jacket, Trousers, Other.
+
+**Fields per item:**
+| Field | Notes |
+|---|---|
+| Item Type | Enum |
+| Serial Number | Unique per coach account |
+| Manufacture Date | Date |
+| Cylinder Fill Date | Date (cylinders only) |
+| Cylinder Expiry Date | Manufacture date + 10 years (auto-calculated, editable) |
+| Assigned To Athlete | FK nullable |
+| Condition Notes | Text |
+
+**Assignment log:** Every assignment/unassignment is stored as a timestamped `InventoryAssignment` record for audit.
+
+**Cylinder expiry alert:** Celery daily cron checks cylinders where `expiry_date ≤ today + 90 days`. Sends in-app notification + push to Coach. Alert is re-sent weekly until resolved.
+
+---
+
+### FR-014 — Parent Access
+
+- Parent account is linked to exactly one Athlete during registration.
+- Read-only dashboard tabs: **Attendance** (monthly heatmap), **Evaluations** (radar chart + scores), **Diary** (sleep, RHR, stress only — training notes hidden).
+- No write access to any data.
+- Subscription: ₹20/month. On cancellation, access is immediately suspended.
+
+---
+
+### FR-015 — External Expert Profiles (Phase 1)
+
+Expert types: S&C Coach, Physiotherapist, Psychologist, External Consultant Coach, Yoga Expert, Dietician.
+
+**Expert profile fields:** Expert type, degree(s), years of experience, institute / practice name, service description (500 chars max), profile photo.
+
+**Phase 1 scope:**
+- Expert registers and creates a profile.
+- Profile is listed in a public marketplace directory, searchable by type and location.
+- Athletes/Coaches can view expert profiles.
+
+**Out of scope for Phase 1:** Booking, scheduling, payment processing, messaging between users and experts.
+
+---
+
+## Non-Functional Requirements
+
+---
+
+### NFR-001 — Security
+
+| Rule | Detail |
+|---|---|
+| Transport | TLS 1.3 minimum on all API endpoints; HSTS enabled |
+| JWT | RS256 signing; access token TTL = 15 min; refresh token TTL = 30 days with rotation |
+| OTP | 120-second expiry; max 3 resend requests per hour; 3 failed attempts → 15-min lockout |
+| reCAPTCHA | v3 on `/register` and `/login`; server-side score validation ≥ 0.5 |
+| Passwords | bcrypt cost factor 12; never logged or returned in any API response |
+| Offline cache | AES-256 encryption; key derived from device fingerprint + credential hash |
+| PII | DOB and mobile stored with field-level encryption; soft-delete with 30-day purge window |
+| File storage | SCATT/Meyton files in private S3 bucket; pre-signed download URLs (1-hour TTL) |
+| Rate limiting | 100 req/min per IP on auth endpoints via Redis token bucket |
+
+---
+
+### NFR-002 — Performance & Scalability
+
+| Requirement | Target |
+|---|---|
+| API response time (p95) | < 300ms for read endpoints under normal load |
+| Shot-log bulk upload | Handled asynchronously via Celery; frontend polls for completion |
+| Concurrent users | System must sustain thousands of concurrent shot-log submissions during peak competition season |
+| Database | PostgreSQL with asyncpg; `ShotLog` and `AttendanceRecord` tables partitioned by year-month |
+| Cache | Redis caches KPI aggregates (60s TTL) and athlete roster (30s TTL) |
+| Horizontal scaling | Stateless FastAPI workers behind Nginx; Celery workers scale independently |
+
+---
+
+### NFR-003 — UI/UX
+
+- **Colour palette:** High-contrast theme optimised for indoor shooting range lighting and outdoor bright conditions. Avoid low-contrast pastels. Default to dark-on-light with an optional dark mode.
+- **Typography:** Minimum 16px base font size; all data grids use monospaced numerics for score alignment.
+- **Data grids:** Dense but readable; performance score grids must not trigger horizontal scroll on a 375px viewport.
+- **Loading states:** Skeleton loaders (not spinners) for all data-fetching components.
+- **Offline indicator:** Persistent banner when device is offline; cached data is clearly labelled as "Last updated [timestamp]".
+- **Accessibility:** WCAG 2.1 AA minimum; all interactive elements keyboard-navigable.
+
+---
+
+### NFR-004 — Compliance
+
+| Regulation | Requirement |
+|---|---|
+| GDPR / DPDP Act | Explicit consent screen on registration; right-to-erasure endpoint (`DELETE /api/v1/me`) initiates 30-day soft-delete |
+| Minor athlete data | Parent-linked athletes flagged as minors; additional PII encryption; parental consent required at registration |
+| Data residency | All personal data stored on servers within India (for DPDP compliance) |
+| Audit logs | All write operations on athlete evaluations, tier changes, and fee records logged with user ID + timestamp |
+| Survey / AI disclaimer | In-app PII & AI-use disclaimer shown to Coaches before enabling AI-assisted coaching features; consent stored |

@@ -1,0 +1,14 @@
+venv/
+__pycache__/
+*.pyc
+.env
+db.sqlite3
+core/
+accounts/
+athletes/
+coaching/
+performance/
+training/
+academy/
+billing/
+manage.py
