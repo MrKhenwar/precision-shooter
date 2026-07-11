@@ -22,6 +22,18 @@
     },
     "plugins": [
       "expo-secure-store"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "672c67d2-8fa2-4931-809f-705badc75539"
+      }
+    },
+    "owner": "viditkhenwar",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/672c67d2-8fa2-4931-809f-705badc75539"
+    }
   }
 }
