@@ -12,4 +12,6 @@ COPY app ./app
 COPY migrate_data.py .
 
 # Render injects $PORT; default to 8000 for local docker runs.
-CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}
+# --workers 1: pin a single worker (WEB_CONCURRENCY>1 caused workers with
+# unmaterialized lazy route tables to serve plain 404s).
+CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1

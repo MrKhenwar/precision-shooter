@@ -19,6 +19,10 @@ from .routers import academy, athletes, auth, billing, coaching, performance, tr
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    # Force eager materialization of lazily-included routers (FastAPI 0.138+):
+    # generating the OpenAPI schema walks every route, so no worker can serve
+    # requests with a half-built route table.
+    app.openapi()
     yield
 
 
